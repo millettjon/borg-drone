@@ -185,9 +185,7 @@ class Backup
       cmd += ["::#{hostname}-#{Time.now.strftime "%Y-%m-%d-%H:%M:%S"}"]
 
       # backup root
-      puts "FIXME: backing up from limited path."
       #cmd += ["/"]
-      cmd += ["/home/jam/src/backup"]
 
       $log.info ["Creating archive", cmd]
       begin
