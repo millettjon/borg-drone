@@ -1,0 +1,252 @@
+#!/usr/bin/env ruby
+
+# = Lets cron handle email.
+# = Looks for files in the current directory.
+
+$: << (File.expand_path(File.dirname(__FILE__) + "/..") + "/lib")
+require 'jam/app'
+$log = JAM::App::log
+$log.level = :info
+
+require 'fileutils'
+require 'thor'
+require 'time'
+
+class Backup
+  include JAM::App
+
+  def servers()
+    @servers ||= config[:servers]
+  end
+
+  def assert_server(server)
+    result = servers.find {|s| s[:host] == server}
+    return result if result
+    result = servers.find {|s| s[:alias] == server}
+    return result if result
+    hosts = servers.map { |s| {host: s[:host], alias: s[:alias]}}
+    die "Unknown server #{server}. Known servers are: #{hosts.inspect}."
+  end
+
+  def repo(server)
+    host = server[:host]
+    user = server[:user]
+    path = hostname
+    "#{user}@#{host}:#{path}"
+  end
+
+  def base_cmd(server)
+    ENV["BORG_BASE_DIR"] = "."
+    ENV["BORG_REPO"] = repo(server)
+    ENV["BORG_PASSPHRASE"] = "cat borg.passphrase"
+
+    cmd = ["borg"]
+    # common options
+    cmd += server[:options] || []
+    cmd
+  end
+
+  # Create .ssh directory.
+  def ensure_ssh_dir
+    return if File.directory? ".ssh"
+    FileUtils.mkdir ".ssh", mode: 0700
+    $log.info "Created directory .ssh."
+  end
+
+  # Generate ssh append only key.
+  def ensure_ssh_key
+    key_file = ".ssh/id_rsa"
+    return if File.exists? key_file
+    %x(ssh-keygen -f "#{key_file}" -t rsa -b 2048 -N '' -C "backup@#{hostname}")
+    $log.info "Created ssh key for append only."
+  end
+
+  def ensure_known_hosts
+    known_hosts = ".ssh/known_hosts"
+    return if File.exists? known_hosts
+
+    $log.info "Generating #{known_hosts}."
+    config[:servers].each do |server|
+      %x(ssh-keyscan #{server[:host]} >> #{known_hosts})
+    end
+  end
+
+  def ensure_passphrase
+   passphrase = "borg.passphrase"
+   return if File.exists? passphrase
+
+   $log.info "Generating passphrase in file #{passphrase}."
+   %x(apg -m 25 -x 1 -M SNCL -a 1 -n 1 > #{passphrase})
+   FileUtils.chmod 0600, passphrase
+  end
+
+  def ensure_repos
+    config[:servers].each do |server|
+      # Check if repo is initialized.
+      begin
+        sh base_cmd(server) + ["info"]
+        puts "Repo #{repo(server)} already initialized."
+        next
+      rescue JAM::ShellException => e
+        # Repository borg@backup2:/mnt/ebs/borg/repo/mx-dev1 does not exist.
+        unless e.status.exitstatus == 2 and e.output =~ /Repository .* does not exist/
+          raise e
+        end
+      end
+      $log.info "Initializing repo #{repo(server)}."
+      sys(base_cmd(server) + ["init", "--encryption=repokey-blake2"])
+    end
+  end
+
+  def append_only_key(key, path, opts={})
+    default_opts = { borg: "/usr/bin/borg",
+                     restrict_to: "repository" }
+    opts = default_opts.merge(opts)
+    %Q[command="#{opts[:borg]} serve --append-only --restrict-to-#{opts[:restrict_to]} #{path}",no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc #{key}]
+  end
+
+  # Check that append only authorized_keys entry exists.
+  def ensure_authorized_keys
+    key = File.read(".ssh/id_rsa.pub").chomp
+    config[:servers].each do |server|
+      key_line = append_only_key(key, hostname, server[:key_options]) + "\n"
+      #puts key_line.inspect
+
+      # Mount the storage server.
+      # Note: Use sshfs here since this is a lowest common denominator
+      # that works with rsync.net and also a regular server.
+      FileUtils.mkdir_p "mnt"
+      sys ["sshfs", "#{server[:user]}@#{server[:host]}:", "mnt"]
+      begin
+        # Setup authorized_keys.
+        ak_file = "mnt/.ssh/authorized_keys"
+        akeys = File.readlines(ak_file)
+      
+        # Next if key is already installed.
+        next if akeys.include? key_line
+
+        # Filter out any old copies of the key.
+        key_data = key.split(' ')[1]
+        matches = akeys.grep(/#{Regexp.escape(key_data)}/)
+        unless matches.empty?
+          akeys = akeys - matches
+        end
+
+        # Add the key.
+        $log.info ["Installing append only key", {host: server[:host], user: server[:user], key_line: key_line}]
+        akeys << key_line
+
+        IO.write(ak_file, akeys.join(""))
+      ensure
+        sys ["fusermount", "-u", File.expand_path("mnt")]
+      end
+    end
+  end
+
+  def configure
+    config # make sure config loads correctly
+    ensure_ssh_dir
+    ensure_ssh_key
+    ensure_known_hosts
+    ensure_passphrase
+    ensure_repos
+    ensure_authorized_keys
+  end
+
+  def create(target_server=nil)
+    assert_server(target_server) if target_server
+
+    # TODO: make zfs snapshot
+
+    servers.each do |server| 
+      target_server and next unless server[:host] == target_server
+      
+      cmd = base_cmd(server)
+
+      # Use dedicated ssh key with append only access.
+      ENV["BORG_RSH"] ="ssh -i .ssh/id_rsa"
+
+      # command and command options
+      cmd += ["create"]
+      cmd += ["--compression", "zlib,6"]
+      cmd += ["--info"]
+      cmd += ["--stats"]
+      # cmd += ["--progress"] if interactive?  # doesn't work since we capture output for logging
+      cmd += ["--one-file-system"]
+      cmd += ["--noatime"]
+      cmd += ["--show-rc"]
+
+      # customizable excludes
+      Dir["patterns.d/*"].sort.each do |path|
+        cmd += ["--patterns-from", path]
+      end
+
+      # archive name
+      cmd += ["::#{hostname}-#{Time.now.strftime "%Y-%m-%d-%H:%M:%S"}"]
+
+      # backup root
+      puts "FIXME: backing up from limited path."
+      #cmd += ["/"]
+      cmd += ["/home/jam/src/backup"]
+
+      $log.info ["Creating archive", cmd]
+      begin
+        out = sh cmd
+        $log.info "Backup completed successfully.\n#{out}"
+        next
+      rescue JAM::ShellException => e
+        if e.status.exitstatus == 1
+          $log.warn "Backup completed with warnings.\n#{out}"
+          next
+        end
+      end
+      $log.error ["Backup failed", $!.to_s]
+    end
+  end
+
+  def borg(server, *args)
+    server = assert_server(server)
+    # add server aliases
+
+    cmd = base_cmd(server)
+    cmd += args
+    $log.info ["Calling borg with arguments", cmd]
+    sys cmd
+  end
+
+  def rsync_net_quota
+    server = assert_server("rsync.net")
+    sys ["ssh", "#{server[:user]}@#{server[:host]}", "quota"]
+  end
+end
+
+class BackupCLI < Thor
+  def initialize(*args)
+    super(*args)
+    @backup = Backup.new
+  end
+
+  desc "create [SERVER]", "Creates a new snapshot on SERVER."
+  def create(server=nil)
+    @backup.create(server)
+  end
+
+  desc "configure", "Performs extra configuration needed for backups."
+  def configure()
+    @backup.configure()
+  end
+
+  desc "borg SERVER [ARG ...]", "Using repo server, calls borg with passed arguments."
+  def borg(server, *args)
+    @backup.borg(server, *args)
+  end
+
+  desc "rsync_net quota", "Show quota for rsync.net."
+  def rsync_net_quota(command)
+    @backup.rsync_net_quota()
+  end
+
+end
+
+$log.info ["Started", {argv: ARGV}]
+BackupCLI.start
