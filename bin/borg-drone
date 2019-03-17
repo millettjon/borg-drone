@@ -3,7 +3,8 @@
 # = Lets cron handle email.
 # = Looks for files in the current directory.
 
-$: << (File.expand_path(File.dirname(__FILE__) + "/..") + "/lib")
+$: << (File.dirname(File.realdirpath(__FILE__)) + "/../lib")
+
 require 'jam/app'
 $log = JAM::App::log
 $log.level = :info
