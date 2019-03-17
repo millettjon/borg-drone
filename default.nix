@@ -8,7 +8,7 @@ let env = bundlerEnv {
 in
 stdenv.mkDerivation {
   name = "borg-drone";
-  buildInputs = [ env.wrappedRuby borgbackup apg sshfs];
+  buildInputs = [ env.wrappedRuby borgbackup apg sshfs ];
   script = ./bin/borg-drone;
   buildCommand = ''
     install -D -m755 $script $out/bin/borg-drone
