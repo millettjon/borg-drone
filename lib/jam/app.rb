@@ -1,6 +1,7 @@
 require 'jam/log'
 require 'jam/sh'
 require 'yaml'
+require 'fileutils'
 
 module JAM
   module App
@@ -27,7 +28,8 @@ module JAM
       stdout_log.level = ::Logger::WARN
 
       # Save 2 1MB files
-      file_log = ::Logger.new("#{JAM::App.name}.log", 2, 1024*1000)
+      FileUtils.mkdir_p "var/log"
+      file_log = ::Logger.new("var/log/#{JAM::App.name}.log", 2, 1024*1000)
       file_log.level = ::Logger::INFO
 
       [stdout_log, file_log].each do |log| 
@@ -43,7 +45,7 @@ module JAM
     end
 
     def config_file
-      "#{JAM::App.name}.yaml"
+      "etc/#{JAM::App.name}.yaml"
     end
 
     def config()

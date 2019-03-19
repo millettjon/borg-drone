@@ -37,9 +37,11 @@ class Backup
   end
 
   def base_cmd(server)
-    ENV["BORG_BASE_DIR"] = "."
+    ENV["BORG_BASE_DIR"] = "var"
+    ENV["BORG_CONFIG_DIR"] = "var/config"
+    ENV["BORG_CACHE_DIR"] = "var/cache"
     ENV["BORG_REPO"] = repo(server)
-    ENV["BORG_PASSPHRASE"] = File.read "borg.passphrase"
+    ENV["BORG_PASSPHRASE"] = File.read "etc/borg.passphrase"
 
     cmd = ["borg"]
     # common options
@@ -89,7 +91,6 @@ class Backup
         puts "Repo #{repo(server)} already initialized."
         next
       rescue JAM::ShellException => e
-        # Repository borg@backup2:/mnt/ebs/borg/repo/mx-dev1 does not exist.
         unless e.status.exitstatus == 2 and e.output =~ /Repository .* does not exist/
           raise e
         end
@@ -116,11 +117,12 @@ class Backup
       # Mount the storage server.
       # Note: Use sshfs here since this is a lowest common denominator
       # that works with rsync.net and also a regular server.
-      FileUtils.mkdir_p "mnt"
-      sys ["sshfs", "#{server[:user]}@#{server[:host]}:", "mnt"]
+      mnt = "var/mnt"
+      FileUtils.mkdir_p mnt
+      sys ["sshfs", "#{server[:user]}@#{server[:host]}:", mnt]
       begin
         # Setup authorized_keys.
-        ak_file = "mnt/.ssh/authorized_keys"
+        ak_file = "#{mnt}/.ssh/authorized_keys"
         akeys = File.readlines(ak_file)
       
         # Next if key is already installed.
@@ -139,7 +141,7 @@ class Backup
 
         IO.write(ak_file, akeys.join(""))
       ensure
-        sys ["fusermount", "-u", File.expand_path("mnt")]
+        sys ["fusermount", "-u", File.expand_path(mnt)]
       end
     end
   end
@@ -156,8 +158,6 @@ class Backup
 
   def create(target_server=nil)
     assert_server(target_server) if target_server
-
-    # TODO: make zfs snapshot
 
     servers.each do |server| 
       target_server and next unless server[:host] == target_server
@@ -178,7 +178,7 @@ class Backup
       cmd += ["--show-rc"]
 
       # customizable excludes
-      Dir["patterns.d/*"].sort.each do |path|
+      Dir["etc/patterns.d/*"].sort.each do |path|
         cmd += ["--patterns-from", path]
       end
 
