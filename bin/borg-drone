@@ -39,7 +39,7 @@ class Backup
   def base_cmd(server)
     ENV["BORG_BASE_DIR"] = "."
     ENV["BORG_REPO"] = repo(server)
-    ENV["BORG_PASSPHRASE"] = "cat borg.passphrase"
+    ENV["BORG_PASSPHRASE"] = File.read "borg.passphrase"
 
     cmd = ["borg"]
     # common options
