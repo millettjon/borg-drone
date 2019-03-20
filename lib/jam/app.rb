@@ -40,10 +40,6 @@ module JAM
       @log = JAM::Log::MultiLogger.new( stdout_log, file_log )
     end
 
-    def hostname
-      @hostname ||= %x(hostname).chomp
-    end
-
     def config_file
       "etc/#{JAM::App.name}.yaml"
     end
@@ -59,6 +55,10 @@ module JAM
       exit 2
     end
   end
+end
+
+def hostname
+  @hostname ||= %x(hostname).chomp
 end
 
 # Returns true if the current process is interactive.
