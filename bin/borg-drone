@@ -7,7 +7,6 @@ $: << (File.dirname(File.realdirpath(__FILE__)) + "/../lib")
 
 require 'jam/app'
 $log = JAM::App::log
-$log.level = :info
 
 require 'fileutils'
 require 'thor'
