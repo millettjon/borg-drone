@@ -119,7 +119,7 @@ class Backup
   end
 
   def ensure_passphrase
-   passphrase = "borg.passphrase"
+   passphrase = "etc/borg.passphrase"
    return if File.exists? passphrase
 
    $log.info "Generating passphrase in file #{passphrase}."
