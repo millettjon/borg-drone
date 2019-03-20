@@ -7,6 +7,7 @@ $: << (File.dirname(File.realdirpath(__FILE__)) + "/../lib")
 
 require 'jam/app'
 $log = JAM::App::log
+$log.level = :info if interactive?
 
 require 'fileutils'
 require 'thor'
@@ -15,36 +16,70 @@ require 'time'
 class Backup
   include JAM::App
 
+  class Server
+    class Base
+      def initialize(name, data)
+        data[:name] = name
+        @data = data
+      end
+      def method_missing(m, *args, &block)
+        @data[m]
+     end
+    end
+
+    class Default < Base
+      def repo()
+        user = @data[:user]
+        path = hostname
+        "#{user}@#{host}:#{path}"
+      end
+    end
+
+    class Borgbase < Base
+      def host()
+        @data[:host] = "#{@data[:id]}.repo.borgbase.com"
+      end
+      def repo()
+        # wb0129kw@wb0129kw.repo.borgbase.com:repo
+        user = @data[:id]
+        path = "repo"
+        "#{user}@#{host}:#{path}"
+      end
+    end
+  end
+
   def servers()
-    @servers ||= config[:servers]
+    return @servers if @servers
+
+    @servers = config[:servers].map do |name, v|
+      case type = (v[:type] || :default).to_sym
+      when :default
+        Server::Default.new(name, v)
+      when :borgbase
+        Server::Borgbase.new(name, v)
+      else raise "Unknown type #{type}"
+      end
+    end
   end
 
-  def assert_server(server)
-    result = servers.find {|s| s[:host] == server}
-    return result if result
-    result = servers.find {|s| s[:alias] == server}
-    return result if result
-    hosts = servers.map { |s| {host: s[:host], alias: s[:alias]}}
-    die "Unknown server #{server}. Known servers are: #{hosts.inspect}."
-  end
-
-  def repo(server)
-    host = server[:host]
-    user = server[:user]
-    path = hostname
-    "#{user}@#{host}:#{path}"
+  def select_servers(target)
+    targets = servers.select do |server|
+      server.name =~ /#{target}/
+    end
+    return targets unless targets.empty?
+    die "Unknown server #{target}. Known servers are: #{config[:servers].keys}."
   end
 
   def base_cmd(server)
     ENV["BORG_BASE_DIR"] = "var"
     ENV["BORG_CONFIG_DIR"] = "var/config"
     ENV["BORG_CACHE_DIR"] = "var/cache"
-    ENV["BORG_REPO"] = repo(server)
+    ENV["BORG_REPO"] = server.repo
     ENV["BORG_PASSPHRASE"] = File.read "etc/borg.passphrase"
 
     cmd = ["borg"]
     # common options
-    cmd += server[:options] || []
+    cmd += (server.options || [])
     cmd
   end
 
@@ -65,11 +100,21 @@ class Backup
 
   def ensure_known_hosts
     known_hosts = ".ssh/known_hosts"
-    return if File.exists? known_hosts
+
+    # Return if there is already a key for each server.
+    if File.exists?(known_hosts)
+      lines = File.readlines(known_hosts)
+      found = servers.map {|s| s.host}.select {|h| ! lines.grep(/^#{h}/).empty?}
+      if found.count == servers.count
+        return
+      else
+        FileUtils.rm known_hosts
+      end
+    end
 
     $log.info "Generating #{known_hosts}."
-    config[:servers].each do |server|
-      %x(ssh-keyscan #{server[:host]} >> #{known_hosts})
+    servers.each do |server|
+      %x(ssh-keyscan #{server.host} >> #{known_hosts})
     end
   end
 
@@ -83,18 +128,19 @@ class Backup
   end
 
   def ensure_repos
-    config[:servers].each do |server|
+    servers.each do |server|
+      repo = server.repo
       # Check if repo is initialized.
       begin
         sh base_cmd(server) + ["info"]
-        puts "Repo #{repo(server)} already initialized."
+        puts "Repo #{repo} already initialized."
         next
       rescue JAM::ShellException => e
         unless e.status.exitstatus == 2 and e.output =~ /Repository .* does not exist/
           raise e
         end
       end
-      $log.info "Initializing repo #{repo(server)}."
+      $log.info "Initializing repo #{repo}."
       sys(base_cmd(server) + ["init", "--encryption=repokey-blake2"])
     end
   end
@@ -109,8 +155,14 @@ class Backup
   # Check that append only authorized_keys entry exists.
   def ensure_authorized_keys
     key = File.read(".ssh/id_rsa.pub").chomp
-    config[:servers].each do |server|
-      key_line = append_only_key(key, hostname, server[:key_options]) + "\n"
+    servers.each do |server|
+      # Skip borgbase for now.
+      if server.class == Server::Borgbase
+        $log.info "Skipping update of authorized_keys for borgbase (not implemented)."
+        next
+      end
+
+      key_line = append_only_key(key, hostname, server.key_options) + "\n"
       #puts key_line.inspect
 
       # Mount the storage server.
@@ -118,12 +170,12 @@ class Backup
       # that works with rsync.net and also a regular server.
       mnt = "var/mnt"
       FileUtils.mkdir_p mnt
-      sys ["sshfs", "#{server[:user]}@#{server[:host]}:", mnt]
+      sys ["sshfs", "#{server.user}@#{server.host}:", mnt]
       begin
         # Setup authorized_keys.
         ak_file = "#{mnt}/.ssh/authorized_keys"
         akeys = File.readlines(ak_file)
-      
+
         # Next if key is already installed.
         next if akeys.include? key_line
 
@@ -135,7 +187,7 @@ class Backup
         end
 
         # Add the key.
-        $log.info ["Installing append only key", {host: server[:host], user: server[:user], key_line: key_line}]
+        $log.info ["Installing append only key", {host: server.host, user: server.user, key_line: key_line}]
         akeys << key_line
 
         IO.write(ak_file, akeys.join(""))
@@ -155,12 +207,14 @@ class Backup
     ensure_authorized_keys
   end
 
-  def create(target_server=nil)
-    assert_server(target_server) if target_server
+  def create(target=nil)
+    if target
+      targets = select_servers(target)
+    else
+      targets = servers
+    end
 
-    servers.each do |server| 
-      target_server and next unless server[:host] == target_server
-      
+    targets.each do |server|
       cmd = base_cmd(server)
 
       # Use dedicated ssh key with append only access.
@@ -171,7 +225,7 @@ class Backup
       cmd += ["--compression", "zlib,6"]
       cmd += ["--info"]
       cmd += ["--stats"]
-      # cmd += ["--progress"] if interactive?  # doesn't work since we capture output for logging
+      cmd += ["--progress"] if interactive?  # doesn't work since we capture output for logging
       cmd += ["--one-file-system"]
       cmd += ["--noatime"]
       cmd += ["--show-rc"]
@@ -189,8 +243,12 @@ class Backup
 
       $log.info ["Creating archive", cmd]
       begin
-        out = sh cmd
-        $log.info "Backup completed successfully.\n#{out}"
+        if interactive?
+          sys cmd
+        else
+          out = sh cmd
+          $log.info "Backup completed successfully.\n#{out}"
+        end
         next
       rescue JAM::ShellException => e
         if e.status.exitstatus == 1
@@ -202,19 +260,19 @@ class Backup
     end
   end
 
-  def borg(server, *args)
-    server = assert_server(server)
-    # add server aliases
-
-    cmd = base_cmd(server)
-    cmd += args
-    $log.info ["Calling borg with arguments", cmd]
-    sys cmd
+  def borg(target, *args)
+    targets = select_servers(target)
+    targets.each do |server|
+      cmd = base_cmd(server)
+      cmd += args
+      $log.info ["Calling borg with arguments", cmd]
+      sys cmd
+    end
   end
 
   def rsync_net_quota
-    server = assert_server("rsync.net")
-    sys ["ssh", "#{server[:user]}@#{server[:host]}", "quota"]
+    server = select_servers("rsync.net")[0]
+    sys ["ssh", "#{server.user}@#{server.host}", "quota"]
   end
 end
 
