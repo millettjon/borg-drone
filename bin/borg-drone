@@ -77,6 +77,7 @@ class Backup
     ENV["BORG_REPO"] = server.repo
     ENV["BORG_PASSPHRASE"] = File.read "etc/borg.passphrase"
 
+    $log.info ["base_cmd", {repo: server.repo}]
     cmd = ["borg"]
     # common options
     cmd += (server.options || [])
