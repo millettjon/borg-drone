@@ -20,7 +20,7 @@ module JAM
       time_format = '%Y-%m-%d %H:%M:%S'
       formatter = proc do |severity, datetime, progname, msg|
         data = msg.is_a?(String) ? msg : msg.inspect
-        "[#{datetime}|#{severity}] #{data}\n"
+        "[#{datetime}|#{$$}|#{severity}] #{data}\n"
       end
 
       # Note: logger can't output only at a specified level.
