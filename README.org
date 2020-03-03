@@ -1,0 +1,9 @@
+* Steps to update build
+# Ref: https://github.com/nix-community/bundix
+# Ref: https://nixos.org/nixpkgs/manual/#sec-language-ruby
+
+rm gemset.nix 
+nix-shell -p bundix --run 'bundix -l'
+
+nix-shell -p bundler --run 'bundle lock --update'
+nix-shell -p bundix --run 'bundix'
