@@ -32,7 +32,7 @@ module JAM
       file_log = ::Logger.new("var/log/#{JAM::App.name}.log", 2, 1024*1000)
       file_log.level = ::Logger::INFO
 
-      [stdout_log, file_log].each do |log| 
+      [stdout_log, file_log].each do |log|
         log.datetime_format = time_format
         log.formatter = formatter
       end
@@ -46,7 +46,7 @@ module JAM
 
     def config()
       @config and return @config
-      File.exists?(config_file) or die "Config file #{config_file} not found."
+      File.exist?(config_file) or die "Config file #{config_file} not found."
       @config = YAML::load_file(config_file)
     end
 
